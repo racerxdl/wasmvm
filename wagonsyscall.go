@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -250,11 +251,11 @@ func wasmWrite(proc *exec.Process, sp int32) {
 	var w io.Writer
 
 	switch fd {
-	case 0:
+	case uint64(syscall.Stdout):
 		w = os.Stdout
-	case 1:
+	case uint64(syscall.Stderr):
 		w = os.Stderr
-	case 2:
+	case uint64(syscall.Stdin):
 		w = os.Stdin
 	default:
 		fmt.Printf("No such FD: %d\n", fd)
