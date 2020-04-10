@@ -8,5 +8,5 @@ func Sum(a, b int32) int32 {
 }
 
 func main() {
-	fmt.Println("Test Println")
+	fmt.Println("Hello World from WASM")
 }
