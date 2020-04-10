@@ -18,14 +18,15 @@ func main() {
 	}
 	defer f.Close()
 
+	fmt.Printf("Reading module\n")
 	m, err := wasm.ReadModule(f, importer)
 	if err != nil {
 		log.Fatal(err)
 	}
-	err = validate.VerifyModule(m)
-	if err != nil {
-		log.Fatal(err)
-	}
+	//err = validate.VerifyModule(m)
+	//if err != nil {
+	//	log.Fatal(err)
+	//}
 
 	fmt.Println("Creating VM")
 
@@ -37,6 +38,30 @@ func main() {
 
 	if !ok {
 		panic("cannot find run function")
+	}
+
+	scope["_resume"] = func() {
+		fmt.Printf("Called _resume\n")
+		if scope["exited"].(bool) {
+			panic("Go program has already exited")
+		}
+		run, ok := m.Export.Entries["resume"]
+
+		if !ok {
+			panic("Cannot find resume function in wasm")
+		}
+
+		ret, err := vm.ExecCode(int64(run.Index))
+
+		if err != nil {
+			panic(err)
+		}
+
+		fmt.Printf("Return: %+v\n", ret)
+
+		event := scope["_pendingEvent"].(wasmEvent)
+		event.Result = []interface{}{ret}
+		scope["_pendingEvent"] = event
 	}
 
 	memory := vm.Memory()

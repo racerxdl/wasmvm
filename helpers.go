@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"github.com/go-interpreter/wagon/exec"
 	"math"
+	"reflect"
+	"strings"
 )
 
 func getUInt64(proc *exec.Process, addr int32) uint64 {
@@ -53,4 +55,23 @@ func setInt32(proc *exec.Process, addr int32, val int32) {
 func setUInt8(proc *exec.Process, addr int32, val uint8) {
 	data := []byte{val}
 	_, _ = proc.WriteAt(data, int64(addr))
+}
+
+func reflectValuesToInterface(vals []reflect.Value) []interface{} {
+	islice := make([]interface{}, len(vals))
+
+	for i, v := range vals {
+		islice[i] = v.Interface()
+	}
+
+	return islice
+}
+
+func switchPublicPrivate(name string) string {
+	newName := strings.ToLower(name[0:1]) + name[1:]
+	if newName == name {
+		return strings.ToUpper(name[0:1]) + name[1:]
+	}
+
+	return newName
 }

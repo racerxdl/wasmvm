@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"syscall"
 )
 
@@ -31,7 +32,36 @@ var fsImport = map[string]interface{}{
 			fmt.Printf("Invalid FD: %f\n", fd)
 			return
 		}
-		_, _ = fmt.Fprintf(w, "WASM: %s", string(buf.data[offset:offset+length]))
+
+		n, err := fmt.Fprintf(w, "WASM: %s", string(buf.data[offset:offset+length]))
+
+		if callback != nil {
+			if cbarr, ok := callback.([]interface{}); ok && len(cbarr) > 0 {
+				cb := cbarr[0]
+				t := reflect.TypeOf(cb)
+				v := reflect.ValueOf(cb)
+				inputLen := t.NumIn()
+				outputLen := t.NumOut()
+
+				var verr reflect.Value
+
+				if err == nil {
+					verr = reflect.ValueOf(false)
+				} else {
+					verr = reflect.ValueOf(err)
+				}
+
+				args := []reflect.Value{
+					verr,
+					reflect.ValueOf(n),
+				}
+				fmt.Printf("Callback: %+v %d %d\n", t, inputLen, outputLen)
+
+				result := v.Call(args)
+				fmt.Printf("Result %+v\n", result)
+
+			}
+		}
 	}, // (fd, buf, offset, length, position, callback) {},,
 	"chmod":     func() { fmt.Println("chmod") },     // (path, mode, callback) { callback(enosys()); },,
 	"chown":     func() { fmt.Println("chown") },     // (path, uid, gid, callback) { callback(enosys()); },,

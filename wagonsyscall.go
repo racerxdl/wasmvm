@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"reflect"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -20,7 +21,23 @@ var global = map[string]interface{}{
 	"process":    importProcess,
 	"Uint8Array": importUint8Array,
 }
-var scope = map[string]interface{}{}
+var scope = map[string]interface{}{
+	"exited":        false,
+	"_pendingEvent": nil,
+}
+
+func init() {
+	// scope["_makeFuncWrapper"] = _makeFuncWrapper
+}
+func _makeFuncWrapper(id float64) func(args ...interface{}) []interface{} {
+	return func(args ...interface{}) []interface{} {
+		event := wasmEvent{Id: id, Args: args}
+		scope["_pendingEvent"] = event
+		scope["_resume"].(func())()
+
+		return event.Result
+	}
+}
 
 var storedValues = map[int]interface{}{
 	0: math.NaN(),
@@ -63,22 +80,18 @@ func StoreAsMemoryObject(proc *exec.Process, addr int64, val interface{}) {
 }
 
 func StoreObject(proc *exec.Process, addr int64, val interface{}) {
-	if strings.Contains(reflect.TypeOf(val).String(), "map") {
+	typeName := reflect.TypeOf(val).String()
+	if strings.Contains(typeName, "map") ||
+		strings.Contains(typeName, "func") ||
+		strings.Contains(typeName, "uint8array") ||
+		strings.Contains(typeName, "interface") ||
+		strings.Contains(typeName, "wasmEvent") {
 		StoreAsMemoryObject(proc, addr, val)
 		return
 	}
 
-	if v, ok := val.(*uint8array); ok {
-		StoreAsMemoryObject(proc, addr, v)
-		return
-	}
-	if v, ok := val.(uint8array); ok {
-		StoreAsMemoryObject(proc, addr, v)
-		return
-	}
-
 	data := make([]byte, 8)
-
+	fmt.Printf("TypeName: %s\n", typeName)
 	id, ok := storedIds[val]
 	if !ok {
 		if len(idpool) > 0 {
@@ -220,7 +233,7 @@ func LoadSlice(proc *exec.Process, p int32) []byte {
 
 type GoHostFunc func(proc *exec.Process, p int32)
 
-func debug(proc *exec.Process, p int32) {
+func _debug(proc *exec.Process, p int32) {
 	s := LoadString(proc, p)
 	fmt.Printf("DEBUG(%d): %s\n", p, s)
 }
@@ -325,7 +338,7 @@ func valueGet(proc *exec.Process, p int32) {
 	obj, _ := LoadValue(proc, p+8)
 	key := LoadString(proc, p+16)
 
-	//fmt.Printf("Get %s from %d\n", key, id)
+	//fmt.Printf("Get %s \n", key)
 
 	if obj != nil {
 		objVal := reflect.ValueOf(obj)
@@ -341,8 +354,18 @@ func valueGet(proc *exec.Process, p int32) {
 			return
 		}
 
-		fieldVal := objVal.FieldByName(key).Interface()
-		StoreValue(proc, int64(p)+32, fieldVal)
+		fieldVal := objVal.FieldByName(key)
+
+		if !fieldVal.IsValid() {
+			fieldVal = objVal.FieldByName(switchPublicPrivate(key))
+		}
+
+		if !fieldVal.IsValid() {
+			StoreValue(proc, int64(p)+32, nil)
+			return
+		}
+
+		StoreValue(proc, int64(p)+32, fieldVal.Interface())
 	} else {
 		StoreValue(proc, int64(p)+32, nil)
 	}
@@ -358,9 +381,8 @@ func valueSet(proc *exec.Process, p int32) {
 
 	if obj != nil {
 		objVal := reflect.ValueOf(obj)
-		fmt.Printf("Type: %s\n", objVal.Type().Name())
-		if objVal.Type().Name() == "map[]" {
-			fmt.Println("Settingfield")
+		fmt.Printf("Type: %s\n", objVal.Type().String())
+		if strings.Contains(objVal.Type().String(), "map[") {
 			objVal.SetMapIndex(reflect.ValueOf(key), reflect.ValueOf(objs))
 			return
 		}
@@ -407,10 +429,11 @@ func valueCall(proc *exec.Process, p int32) {
 		fieldVal = reflect.ValueOf(fieldVal.Interface())
 		//fmt.Printf("Calling %s from %+v with %+v\n", mV, v, args)
 		//fmt.Printf("Field Val: %+v\n", fieldVal)
-
+		//fmt.Printf("Calling %s\n", mV)
 		defer func() {
 			if r := recover(); r != nil {
-				fmt.Println("Recovered in f", r)
+				fmt.Println("HOST: Recovered in f", r)
+				fmt.Println(string(debug.Stack()))
 				e := r.(string)
 				StoreValue(proc, int64(p+56), e)
 				setUInt8(proc, p+64, 0)
@@ -426,9 +449,10 @@ func valueCall(proc *exec.Process, p int32) {
 				// fmt.Printf("Arg %d: %s (%v)\n", i, argsVal[i].Type().String(), v)
 			}
 		}
-		result := fieldVal.Call(argsVal)
+		result := reflectValuesToInterface(fieldVal.Call(argsVal))
 
-		fmt.Printf("Result: %+v\n", result)
+		//fmt.Printf("Result: %+v\n", result)
+		StoreValue(proc, int64(p+56), result)
 		setUInt8(proc, p+64, 1)
 	}
 }
@@ -461,7 +485,25 @@ func valueNew(proc *exec.Process, p int32) {
 }
 
 func valueLength(proc *exec.Process, p int32) {
-	fmt.Printf("valueLength(%d)\n", p)
+	//fmt.Printf("valueLength(%d)\n", p)
+	v, _ := LoadValue(proc, p+8)
+	l := 0
+	switch castedV := v.(type) {
+	case []interface{}:
+		l = len(castedV)
+	case []float64:
+		l = len(castedV)
+	case []byte:
+		l = len(castedV)
+	case []int:
+		l = len(castedV)
+	case uint8array:
+		l = len(castedV.data)
+	case string:
+		l = len(castedV)
+	}
+
+	setInt64(proc, p+16, int64(l))
 }
 
 func valuePrepareString(proc *exec.Process, p int32) {
@@ -470,6 +512,23 @@ func valuePrepareString(proc *exec.Process, p int32) {
 
 func valueLoadString(proc *exec.Process, p int32) {
 	fmt.Printf("valueLoadString(%d)\n", p)
+	strI, _ := LoadValue(proc, p+8)
+
+	if str, ok := strI.(string); ok {
+		b := append([]byte(str), 0x00)
+		_, _ = proc.WriteAt(b, int64(p+16))
+
+		return
+	}
+
+	if str, ok := strI.([]byte); ok {
+		b := append(str, 0x00)
+		_, _ = proc.WriteAt(b, int64(p+16))
+
+		return
+	}
+
+	fmt.Printf("Invalid string at value. Type %s\n", reflect.TypeOf(strI).String())
 }
 
 func valueInstanceOf(proc *exec.Process, p int32) {
@@ -477,7 +536,19 @@ func valueInstanceOf(proc *exec.Process, p int32) {
 }
 
 func copyBytesToGo(proc *exec.Process, p int32) {
-	fmt.Printf("copyBytesToGo(%d)\n", p)
+	//fmt.Printf("copyBytesToGo(%d)\n", p)
+
+	dst := LoadSlice(proc, p+8)
+	src, _ := LoadValue(proc, p+16)
+
+	if dstU8, ok := src.(*uint8array); ok {
+		copy(dst, dstU8.data)
+		setUInt64(proc, p+40, uint64(len(dst)))
+		setUInt8(proc, p+48, 1)
+		return
+	}
+
+	setUInt8(proc, p+48, 0)
 }
 
 func copyBytesToJS(proc *exec.Process, p int32) {
@@ -549,5 +620,5 @@ var funcs = map[string]GoHostFunc{
 	"syscall/js.valueInstanceOf":    valueInstanceOf,
 	"syscall/js.copyBytesToGo":      copyBytesToGo,
 	"syscall/js.copyBytesToJS":      copyBytesToJS,
-	"debug":                         debug,
+	"debug":                         _debug,
 }
